@@ -17,6 +17,7 @@ dependencies {
     implementation("org.javassist:javassist:3.28.0-GA")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.1.1")
     implementation(kotlin("stdlib-jdk8"))
+    implementation(kotlin("reflect"))
 }
 
 tasks.shadowJar {

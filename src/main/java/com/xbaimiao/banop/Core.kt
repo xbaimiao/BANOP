@@ -1,103 +1,149 @@
-package com.xbaimiao.banop;
+package com.xbaimiao.banop
 
-import com.xbaimiao.banop.module.path.PathMap;
-import com.xbaimiao.banop.scan.*;
-import javassist.ClassPool;
-import kotlinx.coroutines.BuildersKt;
-import kotlinx.coroutines.CoroutineStart;
-import kotlinx.coroutines.GlobalScope;
+import com.xbaimiao.banop.module.path.PathMap
+import com.xbaimiao.banop.scan.*
+import com.xbaimiao.banop.scan.PackageUtil.getSelfClass
+import javassist.ClassPool
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.bukkit.Bukkit
+import org.bukkit.event.Listener
+import java.lang.instrument.Instrumentation
 
-import java.lang.instrument.Instrumentation;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
+object Core {
 
-public class Core {
+    val list: ArrayList<EventChanel> = ArrayList()
+    lateinit var pool: ClassPool
+    private val awakes: MutableList<AwakeMethod> = ArrayList()
 
-    public static List<Listener> list = new ArrayList<>();
-    public static ClassPool pool;
-
-    public static List<AwakeMethod> awakes = new ArrayList<>();
-
-//    public static void main(String[] args) {
-//        try {
-//            Class<?> c = YuanLuTpa.class;
-//            Object INSTANCE = c.getDeclaredField("INSTANCE").get(null);
-//            for (Method method : c.getDeclaredMethods()) {
-//                Awake awake = method.getAnnotation(Awake.class);
-//                if (awake != null) {
-//                    if (Modifier.isStatic(method.getModifiers())) {
-//                        method.invoke(null);
-//                        continue;
-//                    }
-//                    if (INSTANCE != null) {
-//                        method.invoke(INSTANCE);
-//                        continue;
-//                    }
-//                    method.invoke(c.newInstance());
-//                }
-//            }
-//        } catch (Exception e) {
-//            e.printStackTrace();
-//        }
-//    }
-
-    public static void premain(String agentArgs, Instrumentation inst) {
-        for (String aClass : PackageUtil.getSelfClass("com.xbaimiao.banop")) {
+    @JvmStatic
+    fun premain(agentArgs: String?, inst: Instrumentation) {
+        for (aClass in getSelfClass("com.xbaimiao.banop")) {
             try {
-                Class<?> c = Class.forName(aClass);
-                Object INSTANCE;
-                try {
-                    INSTANCE = c.getDeclaredField("INSTANCE").get(null);
-                } catch (NoSuchFieldException | IllegalAccessException e) {
-                    INSTANCE = null;
-                }
-                for (Method method : c.getDeclaredMethods()) {
-                    Awake awake = method.getAnnotation(Awake.class);
+                val c = Class.forName(aClass)
+                val kClass = c.kotlin
+                val instance: Any? = kClass.objectInstance
+                for (method in c.declaredMethods) {
+                    val awake = method.getAnnotation(Awake::class.java)
                     if (awake != null) {
-                        Object obj = null;
-                        if (INSTANCE != null) {
-                            obj = INSTANCE;
+                        var obj: Any? = null
+                        if (instance != null) {
+                            obj = instance
                         }
-                        awakes.add(new AwakeMethod(awake, obj, method));
+                        awakes.add(AwakeMethod(awake, obj, method))
                     }
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
+            } catch (e: ClassNotFoundException) {
+                continue
+            } catch (e: NoClassDefFoundError) {
+                continue
             }
         }
-        try {
-            for (AwakeMethod awake : awakes) {
-                if (awake.getAwake().type().equals(AwakeType.START)) {
-                    awake.getMethod().invoke(awake.getObj());
-                    awakes.remove(awake);
+        GlobalScope.launch {
+            for (awake in awakes) {
+                if (awake.awake.type == AwakeType.START) {
+                    awake.method.invoke(awake.obj)
                 }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
-        pool = ClassPool.getDefault();
-        inst.addTransformer((loader, className, classBeingRedefined, protectionDomain, classfileBuffer) -> {
-            try {
-                for (Listener event : list) {
-                    if (Objects.equals(event.getClazz(), "")) {
-                        if (className.startsWith(event.getStart()) && className.endsWith(event.getEnd())) {
-                            return event.getFunc().invoke(className, pool, PathMap.get(className.replace("/", ".")));
-                        }
-                    } else {
-                        if (className.equalsIgnoreCase(event.getClazz())) {
-                            return event.getFunc().invoke(className, pool, PathMap.get(className.replace("/", ".")));
-                        }
+                if (awake.awake.type == AwakeType.DELAY) {
+                    GlobalScope.launch {
+                        delay(awake.awake.delay)
+                        awake.method.invoke(awake.obj)
                     }
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
             }
-            return null;
-        });
+        }
+        pool = ClassPool.getDefault()
+        inst.addTransformer { _, className, _, _, _ ->
+            for (event in list) {
+                if (event.clazz == "") {
+                    if (className.startsWith(event.start) && className.endsWith(event.end)) {
+                        return@addTransformer event.func.invoke(
+                            className,
+                            pool,
+                            PathMap[className.replace("/", ".")]
+                        )
+                    }
+                } else {
+                    if (className.equals(event.clazz, ignoreCase = true)) {
+                        return@addTransformer event.func.invoke(
+                            className,
+                            pool,
+                            PathMap[className.replace("/", ".")]
+                        )
+                    }
+                }
+            }
+            null
+        }
+        GlobalScope.launch {
+            while (checkServer()) {
+                delay(50)
+            }
+            while (checkServer2()) {
+                delay(50)
+            }
+            for (awake in awakes) {
+                if (awake.awake.type == AwakeType.ENABLE) {
+                    awake.method.invoke(awake.obj)
+                }
+            }
+            registerEvent()
+        }
     }
 
+    /**
+     * 注册bukkit监听器
+     */
+    private fun registerEvent() {
+        for (aClass in getSelfClass()) {
+            val c = Class.forName(aClass)
+            if (c.getAnnotation(BukkitEvent::class.java) != null) {
+                val kClass = c.kotlin
+                if (kClass.objectInstance != null) {
+                    if (kClass.objectInstance is Listener) {
+                        Bukkit.getPluginManager().registerEvents(
+                            kClass.objectInstance as Listener,
+                            Bukkit.getPluginManager().plugins.random()
+                        )
+                    }
+                    continue
+                }
+                val obj = c.newInstance()
+                if (obj is Listener) {
+                    Bukkit.getPluginManager().registerEvents(obj, Bukkit.getPluginManager().plugins.random())
+                }
+            }
+        }
+    }
+
+    private fun checkServer(): Boolean {
+        return try {
+            Class.forName("org.bukkit.event.Listener")
+            false
+        } catch (e: Exception) {
+            true
+        }
+    }
+
+    private fun checkServer2(): Boolean {
+        try {
+            if (Bukkit.getServer() != null) {
+                if (Bukkit.getPluginManager() != null) {
+                    if (Bukkit.getPluginManager().plugins.isNotEmpty()) {
+                        Bukkit.getPluginManager().plugins.forEach {
+                            if (!it.isEnabled) {
+                                return true
+                            }
+                        }
+                        return false
+                    }
+                }
+            }
+            return true
+        } catch (e: Exception) {
+            return true
+        }
+    }
 
 }
